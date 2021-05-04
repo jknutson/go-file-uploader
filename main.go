@@ -17,6 +17,7 @@ import (
 )
 
 var (
+	unused          bool
 	verbose         bool
 	matcherFilePath string = "./data/usb-matcher.json"
 )
