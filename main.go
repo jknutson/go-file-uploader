@@ -7,6 +7,7 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 	"github.com/fsnotify/fsnotify"
 )
@@ -17,9 +18,24 @@ var (
 	s3EndpointUrl string = "s3.us-west-000.backblazeb2.com"
 	s3Region      string = "us-west-000" // TODO: parse from Endpoint?
 	watchPath     string = "./mount"
+	s3Client      *s3.S3
+	s3Uploader    *s3manager.Uploader
 )
 
-func uploadFile(uploader *s3manager.Uploader, localPath string) error {
+func objectExists(objectKey string) (bool, error) {
+	input := &s3.HeadObjectInput{
+		Bucket: aws.String(s3Bucket),
+		Key:    aws.String(objectKey),
+	}
+
+	_, err := s3Client.HeadObject(input)
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func uploadFile(localPath string) error {
 	relPath, err := filepath.Rel(watchPath, localPath)
 	if err != nil {
 		return err
@@ -36,17 +52,28 @@ func uploadFile(uploader *s3manager.Uploader, localPath string) error {
 		Body:   file,
 	}
 
+	exists, err := objectExists(relPath)
+	if err != nil {
+		return err
+	}
+
+	if exists {
+		log.Printf("object exists, not uploading: %s\n", relPath)
+		return nil
+	} else {
+		log.Printf("uploading %s -> s3://%s/%s\n", localPath, s3Bucket, relPath)
+	}
+
 	if false { // testing
 		// TODO: check if file exists first
-		_, err = uploader.Upload(upParams)
+		_, err = s3Uploader.Upload(upParams)
 	} else {
-		log.Printf("%s -> s3://%s/%s\n", localPath, s3Bucket, relPath)
 		return nil
 	}
 	return err
 }
 
-func processDir(uploader *s3manager.Uploader, folderPath string) error {
+func processDir(folderPath string) error {
 	files, err := filesToUpload(folderPath)
 	if err != nil {
 		return err
@@ -55,11 +82,11 @@ func processDir(uploader *s3manager.Uploader, folderPath string) error {
 		statInfo, err := os.Stat(file)
 		if err != nil {
 			// TODO: catch individual errors, attempt processing other files
-			return nil
+			return err
 		}
 		if statInfo.Mode().IsRegular() {
-			uploadFile(uploader, file)
 			log.Printf("%s\n", file)
+			return uploadFile(file)
 		}
 	}
 	return nil
@@ -84,9 +111,11 @@ func filesToUpload(folderPath string) ([]string, error) {
 func main() {
 	sess, err := session.NewSession(&aws.Config{
 		Endpoint: aws.String(s3EndpointUrl),
+		Region:   aws.String(s3Region),
 	})
 
-	uploader := s3manager.NewUploader(sess)
+	s3Client = s3.New(sess)
+	s3Uploader = s3manager.NewUploader(sess)
 
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -110,7 +139,10 @@ func main() {
 					}
 					if statInfo.IsDir() {
 						log.Printf("directory created: %s\n", event.Name)
-						processDir(uploader, event.Name)
+						err := processDir(event.Name)
+						if err != nil {
+							log.Printf("error: %s\n", err)
+						}
 					}
 				}
 			case err, ok := <-watcher.Errors:
