@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
@@ -30,7 +31,14 @@ func objectExists(objectKey string) (bool, error) {
 
 	_, err := s3Client.HeadObject(input)
 	if err != nil {
-		return false, err
+		if aerr, ok := err.(awserr.Error); ok {
+			switch aerr.Code() {
+			case "NotFound":
+				return false, nil
+			default:
+				return false, err
+			}
+		}
 	}
 	return true, nil
 }
@@ -48,7 +56,7 @@ func uploadFile(localPath string) error {
 
 	upParams := &s3manager.UploadInput{
 		Bucket: &s3Bucket,
-		Key:    aws.String(localPath),
+		Key:    aws.String(relPath),
 		Body:   file,
 	}
 
@@ -64,12 +72,7 @@ func uploadFile(localPath string) error {
 		log.Printf("uploading %s -> s3://%s/%s\n", localPath, s3Bucket, relPath)
 	}
 
-	if false { // testing
-		// TODO: check if file exists first
-		_, err = s3Uploader.Upload(upParams)
-	} else {
-		return nil
-	}
+	_, err = s3Uploader.Upload(upParams)
 	return err
 }
 
@@ -86,7 +89,10 @@ func processDir(folderPath string) error {
 		}
 		if statInfo.Mode().IsRegular() {
 			log.Printf("%s\n", file)
-			return uploadFile(file)
+			err := uploadFile(file)
+			if err != nil {
+				log.Printf("uploadFile error: %s\n", err)
+			}
 		}
 	}
 	return nil
@@ -131,8 +137,7 @@ func main() {
 				if !ok {
 					return
 				}
-				switch event.Op {
-				case fsnotify.Create:
+				if event.Op&fsnotify.Create == fsnotify.Create {
 					statInfo, err := os.Stat(event.Name)
 					if err != nil {
 						log.Fatalf("error: %s\n", err)
